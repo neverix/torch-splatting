@@ -5,6 +5,7 @@ from torch.optim import Adam
 from pathlib import Path
 import os
 from tqdm import tqdm
+import wandb
 
 def exists(x):
     return x is not None
@@ -50,6 +51,8 @@ class Trainer(object):
         **kwargs,
     ):
         super().__init__()
+
+        wandb.init(project="gaussplatest")
 
         self.accelerator = Accelerator(
             split_batches=split_batches,
@@ -159,6 +162,7 @@ class Trainer(object):
                 for k in log_dict.keys():
                     log_str += " {}: {:.3f}".format(k, log_dict[k])
                 
+                wandb.log(dict(loss=total_loss, **log_dict))
                 pbar.set_description(log_str)
 
                 self.opt.step()
