@@ -81,7 +81,7 @@ def build_covariance_2d(
     mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
 ):
     # The following models the steps outlined by equations 29
-	# and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+	# and 31 in "EWA Splatting" (Zwicker et al., 2002).
 	# Additionally considers aspect / scaling of viewport.
 	# Transposes used to account for row-/column-major conventions.
     tan_fovx = math.tan(fov_x * 0.5)
@@ -93,7 +93,7 @@ def build_covariance_2d(
     ty = (t[..., 1] / t[..., 2]).clip(min=-tan_fovy*1.3, max=tan_fovy*1.3) * t[..., 2]
     tz = t[..., 2]
 
-    # Eq.29 locally affine transform 
+    # Eq.29 locally affine transform
     # perspective transform is not affine so we approximate with first-order taylor expansion
     # notice that we multiply by the intrinsic so that the variance is at the sceen space
     J = torch.zeros(mean3d.shape[0], 3, 3).to(mean3d)
@@ -106,7 +106,7 @@ def build_covariance_2d(
     # J[..., 2, 2] = tz / t.norm(dim=-1) # discard
     W = viewmatrix[:3,:3].T # transpose to correct viewmatrix
     cov2d = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
-    
+
     # add low pass filter here according to E.q. 32
     filter = torch.eye(2,2).to(cov2d) * 0.3
     return cov2d[:, :2, :2] + filter[None]
@@ -161,19 +161,19 @@ class GaussRenderer(nn.Module):
         self.debug = False
         self.white_bkgd = white_bkgd
         self.pix_coord = torch.stack(torch.meshgrid(torch.arange(256), torch.arange(256), indexing='xy'), dim=-1).to('cuda')
-        
-    
+
+
     def build_color(self, means3D, shs, camera):
         rays_o = camera.camera_center
         rays_d = means3D - rays_o
         color = eval_sh(self.active_sh_degree, shs.permute(0,2,1), rays_d)
         color = (color + 0.5).clip(min=0.0)
         return color
-    
+
     def render(self, camera, means2D, cov2d, color, opacity, depths):
         radii = get_radius(cov2d)
         rect = get_rect(means2D, radii, width=camera.image_width, height=camera.image_height)
-        
+
         self.render_color = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda')
         self.render_depth = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
         self.render_alpha = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
@@ -184,8 +184,8 @@ class GaussRenderer(nn.Module):
                 # check if the rectangle penetrate the tile
                 over_tl = rect[0][..., 0].clip(min=w), rect[0][..., 1].clip(min=h)
                 over_br = rect[1][..., 0].clip(max=w+TILE_SIZE-1), rect[1][..., 1].clip(max=h+TILE_SIZE-1)
-                in_mask = (over_br[0] > over_tl[0]) & (over_br[1] > over_tl[1]) # 3D gaussian in the tile 
-                
+                in_mask = (over_br[0] > over_tl[0]) & (over_br[1] > over_tl[1]) # 3D gaussian in the tile
+
                 if not in_mask.sum() > 0:
                     continue
 
@@ -198,21 +198,34 @@ class GaussRenderer(nn.Module):
                 sorted_opacity = opacity[in_mask][index]
                 sorted_color = color[in_mask][index]
                 dx = (tile_coord[:,None,:] - sorted_means2D[None,:]) # B P 2
-                
+
                 gauss_weight = torch.exp(-0.5 * (
-                    dx[:, :, 0]**2 * sorted_conic[:, 0, 0] 
+                    dx[:, :, 0]**2 * sorted_conic[:, 0, 0]
                     + dx[:, :, 1]**2 * sorted_conic[:, 1, 1]
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 0, 1]
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 1, 0]))
-                
+
                 alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # B P 1
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,1:]], dim=1).cumprod(dim=1)
-                acc_alpha = (alpha * T).sum(dim=1)
-                tile_color = (T * alpha * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * (1 if self.white_bkgd else 0)
-                tile_depth = ((T * alpha) * sorted_depths[None,:,None]).sum(dim=1)
+                # acc_alpha = (alpha * T).sum(dim=1)
+                alpha = alpha * T
+                alpha = torch.cat((alpha, 1 - alpha.sum(dim=1, keepdim=True)), 1)
+                # sorted_color = torch.nn.functional.pad(
+                #     sorted_color,
+                #      (0, 0, 0, 1),
+                #      value=1 if self.white_bkgd else 0)
+                if self.white_bkgd:
+                    sorted_color = torch.cat((sorted_color,
+                                              torch.zeros_like(sorted_color[-1:])), 0)
+                else:
+                    sorted_color = torch.cat((sorted_color,
+                                              torch.zeros_like(sorted_color[-1:])), 0)
+
+                tile_color = (alpha * sorted_color[None]).sum(dim=1)
+                tile_depth = (alpha[:, :-1] * sorted_depths[None,:,None]).sum(dim=1)
                 self.render_color[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
-                self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
+                self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = (1 - alpha[:, -1]).reshape(TILE_SIZE, TILE_SIZE, -1)
 
         return {
             "render": self.render_color,
@@ -229,45 +242,45 @@ class GaussRenderer(nn.Module):
         scales = pc.get_scaling
         rotations = pc.get_rotation
         shs = pc.get_features
-        
+
         if USE_PROFILE:
             prof = profiler.record_function
         else:
             prof = contextlib.nullcontext
-            
+
         with prof("projection"):
-            mean_ndc, mean_view, in_mask = projection_ndc(means3D, 
-                    viewmatrix=camera.world_view_transform, 
+            mean_ndc, mean_view, in_mask = projection_ndc(means3D,
+                    viewmatrix=camera.world_view_transform,
                     projmatrix=camera.projection_matrix)
             depths = mean_view[:,2]
-        
+
         with prof("build color"):
             color = self.build_color(means3D=means3D, shs=shs, camera=camera)
-        
+
         with prof("build cov3d"):
             cov3d = build_covariance_3d(scales, rotations)
-            
+
         with prof("build cov2d"):
             cov2d = build_covariance_2d(
-                mean3d=means3D, 
-                cov3d=cov3d, 
+                mean3d=means3D,
+                cov3d=cov3d,
                 viewmatrix=camera.world_view_transform,
-                fov_x=camera.FoVx, 
-                fov_y=camera.FoVy, 
-                focal_x=camera.focal_x, 
+                fov_x=camera.FoVx,
+                fov_y=camera.FoVy,
+                focal_x=camera.focal_x,
                 focal_y=camera.focal_y)
 
             mean_coord_x = ((mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
             mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
             means2D = torch.stack([mean_coord_x, mean_coord_y], dim=-1)
-        
+
         with prof("render"):
             rets = self.render(
-                camera = camera, 
+                camera = camera,
                 means2D=means2D,
                 cov2d=cov2d,
                 color=color,
-                opacity=opacity, 
+                opacity=opacity,
                 depths=depths,
             )
 
