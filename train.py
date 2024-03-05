@@ -21,9 +21,9 @@ class GSSTrainer(Trainer):
         super().__init__(**kwargs)
         self.data = kwargs.get('data')
         self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
-        self.lambda_dssim = 0.2
+        self.lambda_dssim = 0.0
         self.lambda_depth = 0.0
-    
+
     def on_train_step(self):
         ind = np.random.choice(len(self.data['camera']))
         camera = self.data['camera'][ind]
@@ -63,7 +63,10 @@ class GSSTrainer(Trainer):
             camera = to_viewpoint_camera(camera)
 
         rgb = self.data['rgb'][ind].detach().cpu().numpy()
+        st = self.gaussRender.speculative_transparency
+        self.gaussRender.speculative_transparency = False
         out = self.gaussRender(pc=self.model, camera=camera)
+        self.gaussRender.speculative_transparency = st
         rgb_pd = out['render'].detach().cpu().numpy()
         depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
         depth = self.data['depth'][ind].detach().cpu().numpy()
@@ -89,17 +92,17 @@ if __name__ == "__main__":
 
     gaussModel = GaussModel(sh_degree=4, debug=False)
     gaussModel.create_from_pcd(pcd=raw_points)
-    
+
     render_kwargs = {
         'white_bkgd': True,
     }
 
-    trainer = GSSTrainer(model=gaussModel, 
+    trainer = GSSTrainer(model=gaussModel,
         data=data,
-        train_batch_size=1, 
+        train_batch_size=1,
         train_num_steps=25000,
         i_image =100,
-        train_lr=1e-3, 
+        train_lr=1e-3,
         amp=False,
         fp16=False,
         results_folder='result/test',
