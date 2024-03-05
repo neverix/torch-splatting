@@ -1,4 +1,3 @@
-%%file torch-splatting/gaussian_splatting/gauss_render.py
 import pdb
 import torch
 import torch.nn as nn
