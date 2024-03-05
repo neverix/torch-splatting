@@ -1,3 +1,4 @@
+%%file torch-splatting/gaussian_splatting/gauss_render.py
 import pdb
 import torch
 import torch.nn as nn
@@ -156,12 +157,14 @@ class GaussRenderer(nn.Module):
     >>> out = gaussRender(pc=gaussModel, camera=camera)
     """
 
-    def __init__(self, active_sh_degree=3, white_bkgd=True, **kwargs):
+    def __init__(self, active_sh_degree=3, white_bkgd=True,
+                 speculative_transparency=True, **kwargs):
         super(GaussRenderer, self).__init__()
         self.active_sh_degree = active_sh_degree
         self.debug = False
         self.white_bkgd = white_bkgd
         self.pix_coord = torch.stack(torch.meshgrid(torch.arange(256), torch.arange(256), indexing='xy'), dim=-1).to('cuda')
+        self.speculative_transparency = speculative_transparency
 
 
     def build_color(self, means3D, shs, camera):
@@ -216,57 +219,45 @@ class GaussRenderer(nn.Module):
                 else:
                     sorted_color = torch.cat((sorted_color,
                                               torch.zeros_like(sorted_color[-1:])), 0)
-                
-                alpha = torch.nn.functional.relu(alpha)
-                alpha = alpha / alpha.sum(dim=1, keepdim=True)
-                sampled_opaque = torch.multinomial(alpha[:, :, 0], 1)
-                sampled_opaque = sampled_opaque.unsqueeze(1)
-                # i wish python had macros. this is slow
-                # doesn't matter but
-                get_pre = lambda tens: (torch.gather(
-                    torch.nn.functional.pad(tens, (0, 0, 1, 0)).cumsum(dim=1), 1,
-                    sampled_opaque.repeat(1, 1, tens.shape[2]))
-                # .detach()
-                ,
-                                        torch.gather(tens, 1, sampled_opaque))
-                opacity_other, opacity_self = get_pre(alpha)
-                color_other, color_self = get_pre(alpha * sorted_color[None])
-                depth_other, depth_self = get_pre(torch.nn.functional.pad(
-                    alpha[:, :-1] * sorted_depths[None, :, None], (0, 0, 0, 1)))
-                
-                opacity_total = opacity_other + opacity_self
-                tile_color = (color_other + color_self) / opacity_total
-                tile_depth = (depth_other + depth_self) / opacity_total
-                alpha_acc = alpha[:, -1] * (sampled_opaque[:, :, 0] == alpha.shape[1] - 1)
 
-                # # have to slice them individually using a CPU tensor so we don't OOM
-                # alphas = []
-                # for a in tqdm(alpha):
-                #     # last index can be negative due to precision issues
-                #     a = torch.maximum(a, torch.zeros_like(a))
-                #     a = a / a.sum()
+                if self.speculative_transparency:
+                    alpha = torch.nn.functional.relu(alpha)
+                    alpha = alpha / alpha.sum(dim=1, keepdim=True)
 
-                #     sampled_opaque = torch.multinomial(a, 1).item()
-                #     a = torch.cat((
-                #         a[:sampled_opaque].detach(),
-                #         a[sampled_opaque:]), dim=0)
-                #     a = a / a.sum()
-                #     alphas.append(a)
-                # alpha = torch.stack(alphas)
+                    sampled_opaque = torch.multinomial(alpha[:, :, 0], 1)
 
-                # sampled_opaque = torch.multinomial(alpha, 1)
-                # with torch.inference_mode():
-                #     sampled_mask = torch.nn.functional.one_hot(sampled_opaque, alpha.shape[1]).int()
-                #     del sampled_opaque
-                #     sampled_excl = sampled_mask.flip(1).cumsum(1).flip(1) > 1
-                # alpha = (alpha.detach() * sampled_excl.detach()).detach() + alpha * sampled_mask
-                # alpha = alpha / alpha.sum(dim=1, keepdim=True)
-                # print(alpha.shape)
-                # alpha = alpha[:, :, None]
 
-                # tile_color = (alpha * sorted_color[None]).sum(dim=1)
-                # tile_depth = (alpha[:, :-1] * sorted_depths[None,:,None]).sum(dim=1)
-                # alpha_acc = (1 - alpha[:, -1])
+                    import random
+                    if random.random() < 0.01:
+                        i = random.randrange(len(alpha))
+                        from matplotlib import pyplot as plt
+                        plt.clf()
+                        plt.plot(alpha[i, :sampled_opaque[i, 0].item()].tolist())
+                        plt.savefig(f"result/sorts{random.randrange(100)}.png")
+
+                    sampled_opaque = sampled_opaque.unsqueeze(1)
+                    # i wish python had macros. this is slow
+                    # doesn't matter but
+                    get_pre = lambda tens: (torch.gather(
+                        torch.nn.functional.pad(tens, (0, 0, 1, 0)).cumsum(dim=1), 1,
+                        sampled_opaque.repeat(1, 1, tens.shape[2]))
+                    # .detach()
+                    ,
+                                            torch.gather(tens, 1, sampled_opaque))
+                    opacity_other, opacity_self = get_pre(alpha)
+                    color_other, color_self = get_pre(alpha * sorted_color[None])
+                    depth_other, depth_self = get_pre(torch.nn.functional.pad(
+                        alpha[:, :-1] * sorted_depths[None, :, None], (0, 0, 0, 1)))
+
+                    opacity_total = opacity_other + opacity_self
+                    tile_color = (color_other + color_self) / opacity_total
+                    tile_depth = (depth_other + depth_self) / opacity_total
+                    alpha_acc = alpha[:, -1] * (sampled_opaque[:, :, 0] == alpha.shape[1] - 1)
+                else:
+                    tile_color = (alpha * sorted_color[None]).sum(dim=1)
+                    tile_depth = (alpha[:, :-1] * sorted_depths[None,:,None]).sum(dim=1)
+                    alpha_acc = (1 - alpha[:, -1])
+
                 self.render_color[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = alpha_acc.reshape(TILE_SIZE, TILE_SIZE, -1)
