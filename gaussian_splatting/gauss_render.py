@@ -210,6 +210,7 @@ class GaussRenderer(nn.Module):
 
                 alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # B P 1
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,1:]], dim=1).cumprod(dim=1)
+                alpha_own = alpha
                 alpha = alpha * T
                 alpha = torch.cat((alpha, 1 - alpha.sum(dim=1, keepdim=True)), 1)
                 if self.white_bkgd:
@@ -223,35 +224,20 @@ class GaussRenderer(nn.Module):
                     alpha = torch.nn.functional.relu(alpha)
                     alpha = alpha / alpha.sum(dim=1, keepdim=True)
 
-                    sampled_opaque = torch.multinomial(alpha[:, :, 0], 1)
+                    sampled_opaque = torch.multinomial(alpha[:, :, 0], 4,
+                                                       # In case we get one splat in a tile
+                                                       replacement=True)
 
-
-                    import random
-                    if random.random() < 0.01:
-                        i = random.randrange(len(alpha))
-                        from matplotlib import pyplot as plt
-                        plt.clf()
-                        plt.plot(alpha[i, :sampled_opaque[i, 0].item()].tolist())
-                        plt.savefig(f"result/sorts{random.randrange(100)}.png")
-
-                    sampled_opaque = sampled_opaque.unsqueeze(1)
-                    # i wish python had macros. this is slow
-                    # doesn't matter but
-                    get_pre = lambda tens: (torch.gather(
-                        torch.nn.functional.pad(tens, (0, 0, 1, 0)).cumsum(dim=1), 1,
-                        sampled_opaque.repeat(1, 1, tens.shape[2]))
-                    # .detach()
-                    ,
-                                            torch.gather(tens, 1, sampled_opaque))
-                    opacity_other, opacity_self = get_pre(alpha)
-                    color_other, color_self = get_pre(alpha * sorted_color[None])
-                    depth_other, depth_self = get_pre(torch.nn.functional.pad(
-                        alpha[:, :-1] * sorted_depths[None, :, None], (0, 0, 0, 1)))
-
-                    opacity_total = opacity_other + opacity_self
-                    tile_color = (color_other + color_self) / opacity_total
-                    tile_depth = (depth_other + depth_self) / opacity_total
-                    alpha_acc = alpha[:, -1] * (sampled_opaque[:, :, 0] == alpha.shape[1] - 1)
+                    sampled_opaque = sampled_opaque.unsqueeze(-1)
+                    tile_color = torch.gather(sorted_color[None].repeat(sampled_opaque.shape[0], 1, 1),
+                                              1, sampled_opaque.repeat(1, 1, 3))
+                    prob = torch.gather(alpha, 1, sampled_opaque)
+                    tile_color = (tile_color * (prob - prob.detach()).exp()).mean(1, keepdim=True)
+                    # tile_color = tile_color.mean(1, keepdim=True)
+                    tile_depth = torch.gather(torch.nn.functional.pad(sorted_depths, (0, 1), value=0)[None,:,None]
+                                              .repeat(sampled_opaque.shape[0], 1, 1),
+                                              1, sampled_opaque).mean(1, keepdim=True)
+                    alpha_acc = torch.ones_like(prob[:, :1, :])
                 else:
                     tile_color = (alpha * sorted_color[None]).sum(dim=1)
                     tile_depth = (alpha[:, :-1] * sorted_depths[None,:,None]).sum(dim=1)
