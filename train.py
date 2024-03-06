@@ -23,6 +23,7 @@ class GSSTrainer(Trainer):
         self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
         self.lambda_dssim = 0.0
         self.lambda_depth = 0.0
+        self.use_l2 = True
 
     def on_train_step(self):
         ind = np.random.choice(len(self.data['camera']))
@@ -44,14 +45,30 @@ class GSSTrainer(Trainer):
         if USE_PROFILE:
             print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
 
-
         l1_loss = loss_utils.l1_loss(out['render'], rgb)
+        l2_loss = loss_utils.l2_loss(out['render'], rgb)
         depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
         ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
 
-        total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
+        pic_loss = l2_loss if self.use_l2 else l1_loss
+        total_loss = (1-self.lambda_dssim) * pic_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
         psnr = utils.img2psnr(out['render'], rgb)
-        log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss, 'psnr': psnr}
+        
+        with torch.inference_mode():
+            st = self.gaussRender.speculative_transparency
+            self.gaussRender.speculative_transparency = False
+            out = self.gaussRender(pc=self.model, camera=camera)
+            self.gaussRender.speculative_transparency = st
+
+        l1_loss = loss_utils.l1_loss(out['render'], rgb)
+        l2_loss = loss_utils.l2_loss(out['render'], rgb)
+        depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
+        ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
+
+        pic_loss = l2_loss if self.use_l2 else l1_loss
+        psnr = utils.img2psnr(out['render'], rgb)
+
+        log_dict = {'total': total_loss,('l2' if self.use_l2 else "l1"): pic_loss, 'ssim': ssim_loss, 'depth': depth_loss, 'psnr': psnr}
 
         return total_loss, log_dict
 
