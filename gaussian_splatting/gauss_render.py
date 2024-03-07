@@ -147,6 +147,22 @@ import torch.autograd.profiler as profiler
 USE_PROFILE = False
 import contextlib
 
+class Reinforce(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, opacity):
+        ctx.save_for_backward(input, opacity)
+        return input.mean(1)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, opacity = ctx.saved_tensors
+        grad_output = grad_output.unsqueeze(1).repeat(1, opacity.shape[1], 1)
+        grad_rgb = grad_output * opacity
+        grad_opacity = (grad_output * input).sum(-1, keepdim=True)
+        return grad_rgb, grad_opacity
+    
+
+
 class GaussRenderer(nn.Module):
     """
     A gaussian splatting renderer
@@ -226,13 +242,15 @@ class GaussRenderer(nn.Module):
 
                     sampled_opaque = torch.multinomial(alpha[:, :, 0], 4,
                                                        # In case we get one splat in a tile
-                                                       replacement=True)
+                                                       replacement=True
+                                                       ).sort(dim=1).values
 
-                    sampled_opaque = sampled_opaque.unsqueeze(-1)
+                    sampled_opaque = sampled_opaque.unsqueeze(2)
                     tile_color = torch.gather(sorted_color[None].repeat(sampled_opaque.shape[0], 1, 1),
                                               1, sampled_opaque.repeat(1, 1, 3))
                     prob = torch.gather(alpha, 1, sampled_opaque)
-                    tile_color = (tile_color * (prob - prob.detach()).exp()).mean(1, keepdim=True)
+                    tile_color = Reinforce.apply(tile_color, prob)
+                    # tile_color = (tile_color * (prob - prob.detach()).exp()).mean(1, keepdim=True)
                     # tile_color = tile_color.mean(1, keepdim=True)
                     tile_depth = torch.gather(torch.nn.functional.pad(sorted_depths, (0, 1), value=0)[None,:,None]
                                               .repeat(sampled_opaque.shape[0], 1, 1),
